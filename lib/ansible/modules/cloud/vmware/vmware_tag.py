@@ -51,6 +51,12 @@ options:
       - User can get this unique ID from facts module.
       required: False
       type: str
+    category_id:
+      description:
+      - The category Name in vCenter should be used to.
+      - If the category name is passed in it will auto grab the ID of the Category Name.
+      required: False
+      type: str
     state:
       description:
       - The state of tag.
@@ -78,6 +84,18 @@ EXAMPLES = r'''
     state: present
   delegate_to: localhost
 
+- name: Create a tag With Category Name
+  vmware_tag:
+    hostname: '{{ vcenter_hostname }}'
+    username: '{{ vcenter_username }}'
+    password: '{{ vcenter_password }}'
+    validate_certs: no
+    category_name: CATEGORY_NAME
+    tag_name: Sample_Tag_0002
+    tag_description: Sample Description
+    state: present
+  delegate_to: localhost
+
 - name: Update tag description
   vmware_tag:
     hostname: '{{ vcenter_hostname }}'
@@ -99,7 +117,7 @@ EXAMPLES = r'''
 '''
 
 RETURN = r'''
-tag_status:
+results:
   description: dictionary of tag metadata
   returned: on success
   type: dict
@@ -108,6 +126,7 @@ tag_status:
         "tag_id": "urn:vmomi:InventoryServiceTag:bff91819-f529-43c9-80ca-1c9dfda09441:GLOBAL"
     }
 '''
+
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.vmware_rest_client import VmwareRestClient
@@ -126,6 +145,7 @@ class VmwareTag(VmwareRestClient):
         self.tag_name = self.params.get('tag_name')
         self.get_all_tags()
         self.category_service = self.api_client.tagging.Category
+
 
     def ensure_state(self):
         """
@@ -154,19 +174,35 @@ class VmwareTag(VmwareRestClient):
         tag_spec.name = self.tag_name
         tag_spec.description = self.params.get('tag_description')
         category_id = self.params.get('category_id', None)
-        if category_id is None:
-            self.module.fail_json(msg="'category_id' is required parameter while creating tag.")
+        ##updated
+        category_name = self.params.get('category_name',None)
+        if category_id is None and category_name is None:
+          self.module.fail_json(msg="'category_id' or 'category_name' is required parameter while creating tag.")
 
         category_found = False
+        category_name_found = False
+        
         for category in self.category_service.list():
             category_obj = self.category_service.get(category)
-            if category_id == category_obj.id:
+            if category_name is not None:
+              if category_name == category_obj.name:
+                category_id = category_obj.id
                 category_found = True
+                category_name_found = True
                 break
-
-        if not category_found:
+            else:
+              if category_id == category_obj.id:
+                category_found = True
+                category_name_found = True
+                break
+        
+        if category_name is not None:
+          if not category_found:
+              self.module.fail_json(msg="Unable to find category specified using 'category_name'- %s " % category_name)
+        else:
+          if not category_found:
             self.module.fail_json(msg="Unable to find category specified using 'category_id' - %s" % category_id)
-
+        
         tag_spec.category_id = category_id
         tag_id = ''
         try:
@@ -176,10 +212,11 @@ class VmwareTag(VmwareRestClient):
 
         if tag_id:
             self.module.exit_json(changed=True,
-                                  tag_status=dict(msg="Tag '%s' created." % tag_spec.name, tag_id=tag_id))
+                                  results=dict(msg="Tag '%s' created." % tag_spec.name,
+                                               tag_id=tag_id))
         self.module.exit_json(changed=False,
-                              tag_status=dict(msg="No tag created", tag_id=tag_id))
-
+                              results=dict(msg="No tag created", tag_id=tag_id))
+        
     def state_unchanged(self):
         """
         Return unchanged state
@@ -209,7 +246,7 @@ class VmwareTag(VmwareRestClient):
             results['msg'] = 'Tag %s updated.' % self.tag_name
             changed = True
 
-        self.module.exit_json(changed=changed, tag_status=results)
+        self.module.exit_json(changed=changed, results=results)
 
     def state_delete_tag(self):
         """
@@ -222,7 +259,8 @@ class VmwareTag(VmwareRestClient):
         except Error as error:
             self.module.fail_json(msg="%s" % self.get_error_message(error))
         self.module.exit_json(changed=True,
-                              tag_status=dict(msg="Tag '%s' deleted." % self.tag_name, tag_id=tag_id))
+                              results=dict(msg="Tag '%s' deleted." % self.tag_name,
+                                           tag_id=tag_id))
 
     def check_tag_status(self):
         """
@@ -230,13 +268,7 @@ class VmwareTag(VmwareRestClient):
         Returns: 'present' if tag found, else 'absent'
 
         """
-        if 'category_id' in self.params:
-            if self.tag_name in self.global_tags and self.params['category_id'] == self.global_tags[self.tag_name]['tag_category_id']:
-                ret = 'present'
-            else:
-                ret = 'absent'
-        else:
-            ret = 'present' if self.tag_name in self.global_tags else 'absent'
+        ret = 'present' if self.tag_name in self.global_tags else 'absent'
         return ret
 
     def get_all_tags(self):
@@ -246,12 +278,11 @@ class VmwareTag(VmwareRestClient):
         """
         for tag in self.tag_service.list():
             tag_obj = self.tag_service.get(tag)
-            self.global_tags[tag_obj.name] = dict(
-                tag_description=tag_obj.description,
-                tag_used_by=tag_obj.used_by,
-                tag_category_id=tag_obj.category_id,
-                tag_id=tag_obj.id
-            )
+            self.global_tags[tag_obj.name] = dict(tag_description=tag_obj.description,
+                                                  tag_used_by=tag_obj.used_by,
+                                                  tag_category_id=tag_obj.category_id,
+                                                  tag_id=tag_obj.id
+                                                  )
 
 
 def main():
@@ -260,6 +291,7 @@ def main():
         tag_name=dict(type='str', required=True),
         tag_description=dict(type='str', default='', required=False),
         category_id=dict(type='str', required=False),
+        category_name=dict(type='str', required=False),
         state=dict(type='str', choices=['present', 'absent'], default='present', required=False),
     )
     module = AnsibleModule(argument_spec=argument_spec)
